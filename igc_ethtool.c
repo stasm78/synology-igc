@@ -8,7 +8,6 @@
 
 #include "igc.h"
 #include "igc_diag.h"
-#include "backport.h"
 #include "backport_overflow.h"
 
 /* forward declaration */

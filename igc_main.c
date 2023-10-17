@@ -16,7 +16,6 @@
 #include "igc.h"
 #include "igc_hw.h"
 #include "igc_tsn.h"
-#include "backport.h"
 #include "backport_overflow.h"
 
 #define DRV_SUMMARY	"Intel(R) 2.5G Ethernet Linux Driver"
@@ -914,7 +913,7 @@ static __le32 igc_tx_launchtime(struct igc_adapter *adapter, ktime_t txtime)
 	 * IGC_BASET, as the value writen into the launchtime
 	 * descriptor field may be misinterpreted.
 	 */
-	div_s64_rem(sub_time.tv64, cycle_time.tv64, &launchtime);
+	div_s64_rem(sub_time, cycle_time, &launchtime);
 
 	return cpu_to_le32(launchtime);
 }
@@ -1554,7 +1553,13 @@ static struct sk_buff *igc_build_skb(struct igc_ring *rx_ring,
 	struct sk_buff *skb;
 
 	/* prefetch first cache line of first page */
+/* because of old kernel 4.1.13-16
 	net_prefetch(va);
+*/
+        prefetch(va);
+#if L1_CACHE_BYTES < 128
+        prefetch((u8 *)va + L1_CACHE_BYTES);
+#endif
 
 	/* build an skb around the page buffer */
 	skb = build_skb(va - IGC_SKB_PAD, truesize);
@@ -1590,7 +1595,13 @@ static struct sk_buff *igc_construct_skb(struct igc_ring *rx_ring,
 	struct sk_buff *skb;
 
 	/* prefetch first cache line of first page */
+/* because of old kernel 4.1.13-16
 	net_prefetch(va);
+*/
+        prefetch(va);
+#if L1_CACHE_BYTES < 128
+        prefetch((u8 *)va + L1_CACHE_BYTES);
+#endif
 
 	/* allocate a skb to store the frags */
 	skb = napi_alloc_skb(&rx_ring->q_vector->napi, IGC_RX_HDR_LEN);
@@ -1664,12 +1675,16 @@ static bool igc_can_reuse_rx_page(struct igc_rx_buffer *rx_buffer)
 	struct page *page = rx_buffer->page;
 
 	/* avoid re-using remote and pfmemalloc pages */
+/* because of old kernel 4.1.13-16
 	if (!dev_page_is_reusable(page))
+*/
+	if (!likely(page_to_nid(page) == numa_mem_id() &&
+                      !page_is_pfmemalloc(page)))
 		return false;
 
 #if (PAGE_SIZE < 8192)
 	/* if we are only owner of page we can reuse it */
-	if (unlikely(atomic_read(&page->_count) - pagecnt_bias > 1))
+	if (unlikely(atomic_read(&page->_refcount) - pagecnt_bias > 1))
 		return false;
 #else
 #define IGC_LAST_OFFSET \
@@ -1684,7 +1699,7 @@ static bool igc_can_reuse_rx_page(struct igc_rx_buffer *rx_buffer)
 	 * number of references the driver holds.
 	 */
 	if (unlikely(!pagecnt_bias)) {
-		atomic_add(USHRT_MAX, &page->_count);
+		atomic_add(USHRT_MAX, &page->_refcount);
 		rx_buffer->pagecnt_bias = USHRT_MAX;
 	}
 
@@ -3779,7 +3794,10 @@ void igc_down(struct igc_adapter *adapter)
 	/* flush and sleep below */
 
 	/* set trans_start so we don't get spurious watchdogs during reset */
+/*
 	netdev->trans_start = jiffies;
+*/
+	netif_trans_update(netdev);
 
 	netif_carrier_off(netdev);
 	netif_tx_stop_all_queues(netdev);
@@ -3900,6 +3918,7 @@ static int igc_change_mtu(struct net_device *netdev, int new_mtu)
  * Returns the address of the device statistics structure.
  * The statistics are updated here and also from the timer callback.
  */
+/*
 static struct rtnl_link_stats64 *igc_get_stats64(struct net_device *netdev,
 			    struct rtnl_link_stats64 *stats)
 {
@@ -3911,6 +3930,25 @@ static struct rtnl_link_stats64 *igc_get_stats64(struct net_device *netdev,
 	memcpy(stats, &adapter->stats64, sizeof(*stats));
 	spin_unlock(&adapter->stats64_lock);
 	return stats;
+}
+*/
+
+/**
+ * igc_get_stats - Get System Network Statistics
+ * @netdev: network interface device structure
+ *
+ * Returns the address of the device statistics structure.
+ * The statistics are updated here and also from the timer callback.
+ */
+static struct net_device_stats *igc_get_stats(struct net_device *netdev)
+{
+	struct igc_adapter *adapter = netdev_priv(netdev);
+
+	if (!test_bit(__IGC_RESETTING, &adapter->state))
+		igc_update_stats(adapter);
+
+	/* only return the current stats */
+	return &netdev->stats;
 }
 
 static netdev_features_t igc_fix_features(struct net_device *netdev,
@@ -4123,9 +4161,14 @@ static void igc_clear_interrupt_scheme(struct igc_adapter *adapter)
 /* Need to wait a few seconds after link up to get diagnostic information from
  * the phy
  */
+/* because of old kernel 4.1.13-16
 static void igc_update_phy_info(struct timer_list *t)
 {
 	struct igc_adapter *adapter = from_timer(adapter, t, phy_info_timer);
+*/
+static void igc_update_phy_info(unsigned long data)
+{
+	struct igc_adapter *adapter = (struct igc_adapter*)data;
 
 	igc_get_phy_info(&adapter->hw);
 }
@@ -4165,9 +4208,15 @@ bool igc_has_link(struct igc_adapter *adapter)
  * igc_watchdog - Timer Call-back
  * @t: timer for the watchdog
  */
+/* because of old kernel 4.1.13-16
 static void igc_watchdog(struct timer_list *t)
 {
 	struct igc_adapter *adapter = from_timer(adapter, t, watchdog_timer);
+*/
+static void igc_watchdog(unsigned long data)
+{
+	struct igc_adapter *adapter = (struct igc_adapter *)data;
+
 	/* Do the rest outside of interrupt context */
 	schedule_work(&adapter->watchdog_task);
 }
@@ -4668,6 +4717,7 @@ static int igc_ioctl(struct net_device *netdev, struct ifreq *ifr, int cmd)
 	}
 }
 
+/* unused in old kernel 4.1.13-16
 static int igc_save_launchtime_params(struct igc_adapter *adapter, int queue,
 				      bool enable)
 {
@@ -4693,7 +4743,9 @@ static int igc_save_launchtime_params(struct igc_adapter *adapter, int queue,
 
 	return 0;
 }
+*/
 
+/* unused in old kernel 4.1.13-16
 static bool is_base_time_past(ktime_t base_time, const struct timespec64 *now)
 {
 	struct timespec64 b;
@@ -4702,6 +4754,7 @@ static bool is_base_time_past(ktime_t base_time, const struct timespec64 *now)
 
 	return timespec64_compare(now, &b) > 0;
 }
+*/
 
 // static bool validate_schedule(struct igc_adapter *adapter,
 // 			      const struct tc_taprio_qopt_offload *qopt)
@@ -4848,7 +4901,7 @@ static const struct net_device_ops igc_netdev_ops = {
 	.ndo_set_rx_mode	= igc_set_rx_mode,
 	.ndo_set_mac_address	= igc_set_mac,
 	.ndo_change_mtu		= igc_change_mtu,
-	.ndo_get_stats64	= igc_get_stats64,
+	.ndo_get_stats		= igc_get_stats,
 	.ndo_fix_features	= igc_fix_features,
 	.ndo_set_features	= igc_set_features,
 	.ndo_features_check	= igc_features_check,
@@ -5124,8 +5177,19 @@ static int igc_probe(struct pci_dev *pdev,
 	wr32(IGC_RXPBS, I225_RXPBSIZE_DEFAULT);
 	wr32(IGC_TXPBS, I225_TXPBSIZE_DEFAULT);
 
+	/* because of old kernel 4.1.13-16
 	timer_setup(&adapter->watchdog_timer, igc_watchdog, 0);
+	*/
+	init_timer(&adapter->watchdog_timer);
+	adapter->watchdog_timer.function = &igc_watchdog;
+	adapter->watchdog_timer.data = (unsigned int)adapter;
+
+	/* because of old kernel 4.1.13-16
 	timer_setup(&adapter->phy_info_timer, igc_update_phy_info, 0);
+	*/
+	init_timer(&adapter->phy_info_timer);
+	adapter->phy_info_timer.function = &igc_update_phy_info;
+	adapter->phy_info_timer.data = (unsigned int)adapter;
 
 	INIT_WORK(&adapter->reset_task, igc_reset_task);
 	INIT_WORK(&adapter->watchdog_task, igc_watchdog_task);

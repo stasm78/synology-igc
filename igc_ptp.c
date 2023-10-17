@@ -64,6 +64,7 @@ static void igc_ptp_write_i225(struct igc_adapter *adapter,
 	wr32(IGC_SYSTIMH, ts->tv_sec);
 }
 
+/*
 static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
 {
 	struct igc_adapter *igc = container_of(ptp, struct igc_adapter,
@@ -89,6 +90,7 @@ static int igc_ptp_adjfine_i225(struct ptp_clock_info *ptp, long scaled_ppm)
 
 	return 0;
 }
+*/
 
 static int igc_ptp_adjtime_i225(struct ptp_clock_info *ptp, s64 delta)
 {
